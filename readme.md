@@ -11,6 +11,19 @@ A full-stack web app for couples (or friends) to:
 
 ---
 
+### UI preview
+
+#### Shared lists
+![Shared lists](screenshots/01-shared-lists.png)
+
+#### Movie night swipe
+![Movie night swipe](screenshots/02-movie-night-swipe.png)
+
+#### Match state
+![Match result](screenshots/03-match.png)
+
+---
+
 ### Tech stack
 
 - **Frontend:** React + Vite
