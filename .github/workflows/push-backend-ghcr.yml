@@ -2,9 +2,6 @@ name: Build and push backend image
 
 on:
   push:
-    paths:
-      - "server/**"
-      - ".github/workflows/push-backend-ghcr.yml"
   workflow_dispatch:
 
 permissions:

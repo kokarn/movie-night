@@ -139,7 +139,7 @@ A full-stack web app for couples (or friends) to:
 
 ### Backend container publish (GHCR)
 
-- This repo includes a workflow at `.github/workflows/push-backend-ghcr.yml` that builds and pushes the backend image to GitHub Container Registry (GHCR) on pushes that touch `server/**`.
+- This repo includes a workflow at `.github/workflows/push-backend-ghcr.yml` that builds and pushes the backend image to GitHub Container Registry (GHCR) on every push.
 - Image name:
   - `ghcr.io/<owner>/<repo>-backend`
 - Published tags:
