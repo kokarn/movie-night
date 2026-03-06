@@ -17,8 +17,13 @@ const EMPTY_FORM = {
   plot: "",
 };
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+
 const requestJson = async (url, options = {}) => {
-  const response = await fetch(url, {
+  const resolvedUrl =
+    API_BASE_URL && url.startsWith("/") ? `${API_BASE_URL}${url}` : url;
+
+  const response = await fetch(resolvedUrl, {
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
