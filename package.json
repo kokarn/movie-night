@@ -1,0 +1,26 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "Movie Night Matcher app",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
+    "build": "npm run build --prefix web",
+    "start": "npm run start --prefix server",
+    "lint": "npm run lint --prefix web"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kokarn/movie-night.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/kokarn/movie-night/issues"
+  },
+  "homepage": "https://github.com/kokarn/movie-night#readme",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
