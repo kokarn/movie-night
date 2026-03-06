@@ -134,3 +134,15 @@ A full-stack web app for couples (or friends) to:
   - `https://kokarn.github.io/movie-night/`
 - For API calls in production, set a repository variable named `VITE_API_BASE_URL` (for example your deployed backend URL).  
   If unset, the frontend uses relative `/api` paths (works for local dev with the Vite proxy).
+
+---
+
+### Backend container publish (GHCR)
+
+- This repo includes a workflow at `.github/workflows/push-backend-ghcr.yml` that builds and pushes the backend image to GitHub Container Registry (GHCR) on every push.
+- Image name:
+  - `ghcr.io/<owner>/<repo>-backend`
+- Published tags:
+  - `sha-<commit-sha>`
+  - `<branch-name>`
+  - `latest` (default branch only)
