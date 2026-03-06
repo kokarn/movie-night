@@ -16,6 +16,7 @@ const EMPTY_FORM = {
   genre: "",
   plot: "",
 };
+const SUGGESTION_LIMIT = 8;
 
 const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
@@ -46,6 +47,15 @@ const formatRuntime = (runtimeMinutes) =>
 
 const formatRating = (imdbRating) =>
   imdbRating || imdbRating === 0 ? imdbRating.toFixed(1) : "N/A";
+
+const MoviePosterThumb = ({ posterUrl, title }) =>
+  posterUrl ? (
+    <img className="movie-thumb" src={posterUrl} alt={`${title} poster`} loading="lazy" />
+  ) : (
+    <div className="movie-thumb placeholder" aria-hidden="true">
+      No poster
+    </div>
+  );
 
 const findNextPendingMovieIndex = (queue, users, startIndex = 0) => {
   if (!queue.length || !users.length) {
@@ -96,7 +106,10 @@ function App() {
     category: "regular",
     ...EMPTY_FORM,
   });
-  const [lookupLoading, setLookupLoading] = useState(false);
+  const [titleSuggestions, setTitleSuggestions] = useState([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [selectionLoading, setSelectionLoading] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
 
   const [nightCategory, setNightCategory] = useState("regular");
@@ -111,6 +124,10 @@ function App() {
       easy: library.filter((movie) => movie.category === "easy"),
     }),
     [library],
+  );
+  const selectedCategory = useMemo(
+    () => CATEGORIES.find((category) => category.value === form.category) || CATEGORIES[0],
+    [form.category],
   );
 
   const syncSessionProgress = (state, preferredStartIndex = 0) => {
@@ -167,6 +184,22 @@ function App() {
     setForm((current) => ({ ...current, [field]: value }));
   };
 
+  const onTitleInputChange = (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      title: value,
+      year: "",
+      imdbId: "",
+      imdbRating: "",
+      runtimeMinutes: "",
+      posterUrl: "",
+      genre: "",
+      plot: "",
+    }));
+    setSuggestionsOpen(Boolean(value.trim()));
+  };
+
   const resetMessages = () => {
     setErrorMessage("");
     setStatusMessage("");
@@ -194,43 +227,80 @@ function App() {
     }
   };
 
-  const lookupMovie = async () => {
-    resetMessages();
+  const applyLookupPayload = useCallback((payload) => {
+    setForm((current) => ({
+      ...current,
+      title: payload.title || current.title,
+      year: payload.year || "",
+      imdbId: payload.imdbId || "",
+      imdbRating:
+        payload.imdbRating || payload.imdbRating === 0 ? String(payload.imdbRating) : "",
+      runtimeMinutes:
+        payload.runtimeMinutes || payload.runtimeMinutes === 0 ? String(payload.runtimeMinutes) : "",
+      posterUrl: payload.posterUrl || "",
+      genre: payload.genre || "",
+      plot: payload.plot || "",
+    }));
+  }, []);
 
-    if (!form.title.trim()) {
-      setErrorMessage("Type a movie title to look up.");
-      return;
-    }
-
-    setLookupLoading(true);
+  const selectSuggestion = async (suggestion) => {
+    setSuggestionsOpen(false);
+    setTitleSuggestions([]);
+    setErrorMessage("");
+    setSelectionLoading(true);
     try {
       const payload = await requestJson("/api/movies/lookup", {
         method: "POST",
-        body: JSON.stringify({ title: form.title }),
+        body: JSON.stringify({
+          title: suggestion.title,
+          imdbId: suggestion.imdbId,
+        }),
       });
-
-      setForm((current) => ({
-        ...current,
-        title: payload.title || current.title,
-        year: payload.year || "",
-        imdbId: payload.imdbId || "",
-        imdbRating:
-          payload.imdbRating || payload.imdbRating === 0 ? String(payload.imdbRating) : "",
-        runtimeMinutes:
-          payload.runtimeMinutes || payload.runtimeMinutes === 0
-            ? String(payload.runtimeMinutes)
-            : "",
-        posterUrl: payload.posterUrl || "",
-        genre: payload.genre || "",
-        plot: payload.plot || "",
-      }));
-      setStatusMessage("Metadata loaded from OMDb.");
+      applyLookupPayload(payload);
+      setStatusMessage("Movie details auto-filled from IMDb.");
     } catch (error) {
       setErrorMessage(error.message);
+      setForm((current) => ({ ...current, title: suggestion.title }));
     } finally {
-      setLookupLoading(false);
+      setSelectionLoading(false);
     }
   };
+
+  useEffect(() => {
+    const query = form.title.trim();
+    if (query.length < 2) {
+      setTitleSuggestions([]);
+      setSuggestionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = setTimeout(async () => {
+      setSuggestionsLoading(true);
+      try {
+        const payload = await requestJson(`/api/movies/search?query=${encodeURIComponent(query)}`);
+        if (cancelled) {
+          return;
+        }
+        setErrorMessage("");
+        setTitleSuggestions(Array.isArray(payload) ? payload.slice(0, SUGGESTION_LIMIT) : []);
+      } catch (error) {
+        if (!cancelled) {
+          setTitleSuggestions([]);
+          setErrorMessage(error.message || "Could not load title suggestions.");
+        }
+      } finally {
+        if (!cancelled) {
+          setSuggestionsLoading(false);
+        }
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [form.title]);
 
   const addMovie = async (event) => {
     event.preventDefault();
@@ -247,19 +317,32 @@ function App() {
 
     setSaveLoading(true);
     try {
+      const lookupPayload = await requestJson("/api/movies/lookup", {
+        method: "POST",
+        body: JSON.stringify({
+          title: form.title.trim(),
+          imdbId: form.imdbId || undefined,
+        }),
+      });
+      applyLookupPayload(lookupPayload);
+
       const payload = await requestJson("/api/library", {
         method: "POST",
         body: JSON.stringify({
           userId: Number(form.userId),
           category: form.category,
-          title: form.title.trim(),
-          year: form.year || null,
-          imdbId: form.imdbId || null,
-          imdbRating: form.imdbRating || null,
-          runtimeMinutes: form.runtimeMinutes || null,
-          posterUrl: form.posterUrl || null,
-          genre: form.genre || null,
-          plot: form.plot || null,
+          title: lookupPayload.title || form.title.trim(),
+          year: lookupPayload.year || null,
+          imdbId: lookupPayload.imdbId || null,
+          imdbRating:
+            lookupPayload.imdbRating || lookupPayload.imdbRating === 0 ? lookupPayload.imdbRating : null,
+          runtimeMinutes:
+            lookupPayload.runtimeMinutes || lookupPayload.runtimeMinutes === 0
+              ? lookupPayload.runtimeMinutes
+              : null,
+          posterUrl: lookupPayload.posterUrl || null,
+          genre: lookupPayload.genre || null,
+          plot: lookupPayload.plot || null,
         }),
       });
 
@@ -376,75 +459,75 @@ function App() {
             </form>
 
             <form onSubmit={addMovie} className="stack-form">
-              <label>
-                Added by
-                <select value={form.userId} onChange={onInputChange("userId")}>
-                  {users.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Category
-                <select value={form.category} onChange={onInputChange("category")}>
+              <div className="list-type-section">
+                <p className="list-type-label">Add to list type</p>
+                <div className="list-type-tabs" role="tablist" aria-label="Choose list type">
                   {CATEGORIES.map((category) => (
-                    <option key={category.value} value={category.value}>
+                    <button
+                      key={category.value}
+                      type="button"
+                      role="tab"
+                      aria-selected={form.category === category.value}
+                      className={form.category === category.value ? "list-type-tab active" : "list-type-tab"}
+                      onClick={() =>
+                        setForm((current) => ({
+                          ...current,
+                          category: category.value,
+                        }))
+                      }
+                    >
                       {category.label}
-                    </option>
+                    </button>
                   ))}
-                </select>
-              </label>
-
-              <label>
-                Movie title
-                <input
-                  value={form.title}
-                  onChange={onInputChange("title")}
-                  placeholder="e.g. About Time"
-                />
-              </label>
-
-              <button type="button" onClick={lookupMovie} disabled={lookupLoading}>
-                {lookupLoading ? "Looking up..." : "Lookup metadata from OMDb"}
-              </button>
-
-              <div className="grid-two">
-                <label>
-                  Year
-                  <input value={form.year} onChange={onInputChange("year")} />
-                </label>
-                <label>
-                  IMDb ID
-                  <input value={form.imdbId} onChange={onInputChange("imdbId")} />
-                </label>
-                <label>
-                  IMDb score
-                  <input value={form.imdbRating} onChange={onInputChange("imdbRating")} />
-                </label>
-                <label>
-                  Runtime (minutes)
-                  <input value={form.runtimeMinutes} onChange={onInputChange("runtimeMinutes")} />
-                </label>
+                </div>
+                <p className="muted form-help">Movies added now go to: {selectedCategory.label}</p>
               </div>
 
               <label>
-                Poster URL
-                <input value={form.posterUrl} onChange={onInputChange("posterUrl")} />
-              </label>
-              <label>
-                Genre
-                <input value={form.genre} onChange={onInputChange("genre")} />
-              </label>
-              <label>
-                Plot
-                <textarea value={form.plot} onChange={onInputChange("plot")} rows={3} />
+                Movie title
+                <div className="autocomplete-wrap">
+                  <input
+                    value={form.title}
+                    onChange={onTitleInputChange}
+                    onFocus={() => setSuggestionsOpen(true)}
+                    onBlur={() => setTimeout(() => setSuggestionsOpen(false), 100)}
+                    placeholder="Type at least 2 characters..."
+                    autoComplete="off"
+                  />
+                  {suggestionsOpen ? (
+                    <div className="autocomplete-menu">
+                      {suggestionsLoading ? (
+                        <p className="autocomplete-empty">Searching titles...</p>
+                      ) : titleSuggestions.length ? (
+                        <ul className="autocomplete-list">
+                          {titleSuggestions.map((movie) => (
+                            <li key={movie.imdbId || `${movie.title}-${movie.year || "unknown"}`}>
+                              <button
+                                type="button"
+                                className="autocomplete-item"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => selectSuggestion(movie)}
+                              >
+                                <span>{movie.title}</span>
+                                <small>{movie.year || "Unknown year"}</small>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="autocomplete-empty">No suggestions yet.</p>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
               </label>
 
-              <button type="submit" disabled={saveLoading}>
-                {saveLoading ? "Saving..." : "Add movie to list"}
+              <p className="muted form-help">
+                Select a suggestion to auto-fill IMDb data, then we save with one click.
+              </p>
+
+              <button type="submit" disabled={saveLoading || selectionLoading}>
+                {saveLoading || selectionLoading ? "Saving..." : "Add movie to list"}
               </button>
             </form>
           </article>
@@ -460,6 +543,7 @@ function App() {
                   <ul className="movie-list">
                     {groupedLibrary[category.value].map((movie) => (
                       <li key={`${category.value}-${movie.id}`} className="movie-row">
+                        <MoviePosterThumb posterUrl={movie.posterUrl} title={movie.title} />
                         <div>
                           <strong>
                             {movie.title}
@@ -561,11 +645,14 @@ function App() {
                 <ul className="movie-list">
                   {sessionState.matches.map((movie) => (
                     <li key={`match-${movie.id}`} className="movie-row">
-                      <strong>
-                        {movie.title}
-                        {movie.year ? ` (${movie.year})` : ""}
-                      </strong>
-                      <span>IMDb: {formatRating(movie.imdbRating)}</span>
+                      <MoviePosterThumb posterUrl={movie.posterUrl} title={movie.title} />
+                      <div>
+                        <strong>
+                          {movie.title}
+                          {movie.year ? ` (${movie.year})` : ""}
+                        </strong>
+                        <span>IMDb: {formatRating(movie.imdbRating)}</span>
+                      </div>
                     </li>
                   ))}
                 </ul>

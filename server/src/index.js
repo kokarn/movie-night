@@ -386,10 +386,52 @@ app.get("/api/library", async (req, res) => {
   }
 });
 
+app.get("/api/movies/search", async (req, res) => {
+  const query = String(req.query?.query || "").trim();
+  if (query.length < 2) {
+    return res.json([]);
+  }
+  if (!process.env.OMDB_API_KEY) {
+    return res.status(400).json({
+      error:
+        "OMDB_API_KEY is not configured. Add it to server/.env to use title autocomplete.",
+    });
+  }
+
+  try {
+    const url = `https://www.omdbapi.com/?apikey=${encodeURIComponent(process.env.OMDB_API_KEY)}&s=${encodeURIComponent(query)}&type=movie&page=1`;
+    const response = await fetch(url);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return res
+        .status(response.status === 401 ? 400 : 502)
+        .json({ error: payload.Error || "Could not reach OMDb right now." });
+    }
+    if (payload.Response === "False" || !Array.isArray(payload.Search)) {
+      return res.status(payload.Error === "Invalid API key!" ? 400 : 200).json(
+        payload.Error === "Invalid API key!"
+          ? { error: payload.Error }
+          : [],
+      );
+    }
+    return res.json(
+      payload.Search.slice(0, 10).map((movie) => ({
+        title: movie.Title || "",
+        year: movie.Year && movie.Year !== "N/A" ? movie.Year : null,
+        imdbId: movie.imdbID && movie.imdbID !== "N/A" ? movie.imdbID : null,
+        posterUrl: movie.Poster && movie.Poster !== "N/A" ? movie.Poster : null,
+      })),
+    );
+  } catch (_error) {
+    return res.status(500).json({ error: "Search failed. Please try again." });
+  }
+});
+
 app.post("/api/movies/lookup", async (req, res) => {
   const title = String(req.body?.title || "").trim();
-  if (!title) {
-    return res.status(400).json({ error: "Title is required." });
+  const imdbId = String(req.body?.imdbId || "").trim();
+  if (!title && !imdbId) {
+    return res.status(400).json({ error: "Title or IMDb id is required." });
   }
 
   if (!process.env.OMDB_API_KEY) {
@@ -400,18 +442,25 @@ app.post("/api/movies/lookup", async (req, res) => {
   }
 
   try {
-    const url = `https://www.omdbapi.com/?apikey=${encodeURIComponent(process.env.OMDB_API_KEY)}&t=${encodeURIComponent(title)}&type=movie`;
+    const queryParam = imdbId
+      ? `i=${encodeURIComponent(imdbId)}`
+      : `t=${encodeURIComponent(title)}&type=movie`;
+    const url = `https://www.omdbapi.com/?apikey=${encodeURIComponent(process.env.OMDB_API_KEY)}&${queryParam}`;
     const response = await fetch(url);
+    const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({ error: "Could not reach OMDb right now." });
+      return res
+        .status(response.status === 401 ? 400 : 502)
+        .json({ error: payload.Error || "Could not reach OMDb right now." });
     }
-    const payload = await response.json();
     if (payload.Response === "False") {
-      return res.status(404).json({ error: payload.Error || "Movie not found." });
+      return res
+        .status(payload.Error === "Invalid API key!" ? 400 : 404)
+        .json({ error: payload.Error || "Movie not found." });
     }
 
     return res.json({
-      title: payload.Title || title,
+      title: payload.Title || title || null,
       year: payload.Year && payload.Year !== "N/A" ? payload.Year : null,
       imdbId: payload.imdbID && payload.imdbID !== "N/A" ? payload.imdbID : null,
       imdbRating:
