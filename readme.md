@@ -124,3 +124,13 @@ A full-stack web app for couples (or friends) to:
 
 - Default seeded users are `"You"` and `"Partner"` (configurable via `DEFAULT_USERS`).
 - Data is stored remotely in JSONBlob (no local DB process required).
+
+---
+
+### GitHub Pages deployment
+
+- This repo includes a workflow at `.github/workflows/deploy-pages.yml` that deploys the `web/` app to GitHub Pages on pushes to `main`.
+- The site URL will be:
+  - `https://kokarn.github.io/movie-night/`
+- For API calls in production, set a repository variable named `VITE_API_BASE_URL` (for example your deployed backend URL).  
+  If unset, the frontend uses relative `/api` paths (works for local dev with the Vite proxy).
