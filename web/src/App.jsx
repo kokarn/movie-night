@@ -17,7 +17,10 @@ const EMPTY_FORM = {
   plot: "",
 };
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.PROD ? "http://movie-api.kokarn.com/" : "")
+).replace(/\/$/, "");
 
 const requestJson = async (url, options = {}) => {
   const resolvedUrl =
