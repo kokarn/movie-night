@@ -15,14 +15,14 @@ A full-stack web app for couples (or friends) to:
 
 - **Frontend:** React + Vite
 - **Backend:** Node.js + Express
-- **Database:** SQLite (`better-sqlite3`)
+- **Persistence:** [JSONBlob](https://jsonblob.com/) (hosted JSON document store)
 
 ---
 
 ### Project structure
 
 - `web/` – React frontend
-- `server/` – Express API + SQLite database
+- `server/` – Express API + JSONBlob-backed persistence
 
 ---
 
@@ -42,7 +42,23 @@ A full-stack web app for couples (or friends) to:
    cp server/.env.example server/.env
    ```
 
-3. (Optional) Add an OMDb key to `server/.env` for auto metadata lookup:
+3. Configure JSONBlob persistence in `server/.env`:
+
+   - Option A (recommended): set an existing blob id
+
+     ```env
+     JSONBLOB_ID=your_blob_id
+     ```
+
+   - Option B: set full blob URL
+
+     ```env
+     JSONBLOB_URL=https://jsonblob.com/api/jsonBlob/your_blob_id
+     ```
+
+   If neither value is set, the server auto-creates a new blob on first start and logs the URL/id to reuse.
+
+4. (Optional) Add an OMDb key to `server/.env` for auto metadata lookup:
 
    ```env
    OMDB_API_KEY=your_key_here
@@ -50,7 +66,7 @@ A full-stack web app for couples (or friends) to:
 
    Without this key, you can still add movie metadata manually.
 
-4. Start frontend + backend:
+5. Start frontend + backend:
 
    ```bash
    npm run dev
@@ -94,4 +110,4 @@ A full-stack web app for couples (or friends) to:
 ### Notes
 
 - Default seeded users are `"You"` and `"Partner"` (configurable via `DEFAULT_USERS`).
-- Database file is created at `server/data/movie-night.db`.
+- Data is stored remotely in JSONBlob (no local DB process required).

@@ -1,87 +1,29 @@
 const cors = require("cors");
-const Database = require("better-sqlite3");
 const dotenv = require("dotenv");
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-
-const dataDir = path.resolve(__dirname, "..", "data");
-fs.mkdirSync(dataDir, { recursive: true });
-const db = new Database(path.join(dataDir, "movie-night.db"));
-
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE
-  );
-
-  CREATE TABLE IF NOT EXISTS movies (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    year TEXT,
-    imdb_id TEXT UNIQUE,
-    imdb_rating REAL,
-    runtime_minutes INTEGER,
-    poster_url TEXT,
-    genre TEXT,
-    plot TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS list_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
-    category TEXT NOT NULL CHECK (category IN ('easy', 'regular')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, movie_id, category)
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT NOT NULL CHECK (category IN ('easy', 'regular')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS session_swipes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
-    liked INTEGER NOT NULL CHECK (liked IN (0, 1)),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (session_id, user_id, movie_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS matches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (session_id, movie_id)
-  );
-`);
+const JSONBLOB_API_ROOT = (process.env.JSONBLOB_API_ROOT || "https://jsonblob.com/api/jsonBlob").replace(
+  /\/$/,
+  "",
+);
 
 const seedUsers = (process.env.DEFAULT_USERS || "You,Partner")
   .split(",")
   .map((name) => name.trim())
   .filter(Boolean);
 
-const insertUser = db.prepare("INSERT OR IGNORE INTO users (name) VALUES (?)");
-for (const name of seedUsers) {
-  insertUser.run(name);
-}
+let blobUrl = null;
+let storeCache = null;
+let cacheUpdatedAt = 0;
+let mutationQueue = Promise.resolve();
 
-app.use(cors());
-app.use(express.json());
+const READ_REFRESH_MS = 5000;
+
+const nowIso = () => new Date().toISOString();
 
 const normalizeCategory = (category) =>
   category === "easy" || category === "easy-watching" ? "easy" : "regular";
@@ -93,134 +35,313 @@ const parseRuntimeMinutes = (runtimeValue) => {
   if (typeof runtimeValue === "number") {
     return Number.isFinite(runtimeValue) ? Math.max(Math.round(runtimeValue), 0) : null;
   }
-
   const match = String(runtimeValue).match(/(\d+)/);
   if (!match) {
     return null;
   }
-
   const minutes = Number(match[1]);
   return Number.isFinite(minutes) ? minutes : null;
 };
 
-const movieQueryByCategory = `
-  SELECT
-    m.id,
-    m.title,
-    m.year,
-    m.imdb_id AS imdbId,
-    m.imdb_rating AS imdbRating,
-    m.runtime_minutes AS runtimeMinutes,
-    m.poster_url AS posterUrl,
-    m.genre,
-    m.plot,
-    le.category,
-    GROUP_CONCAT(DISTINCT u.name) AS addedBy,
-    COUNT(le.id) AS addedCount
-  FROM list_entries le
-  JOIN movies m ON m.id = le.movie_id
-  JOIN users u ON u.id = le.user_id
-  WHERE le.category = ?
-  GROUP BY m.id, le.category
-  ORDER BY addedCount DESC, m.title COLLATE NOCASE ASC
-`;
+const clone = (value) => structuredClone(value);
 
-const mapMovieRow = (row) => ({
-  id: row.id,
-  title: row.title,
-  year: row.year,
-  imdbId: row.imdbId || null,
-  imdbRating: row.imdbRating === null ? null : Number(row.imdbRating),
-  runtimeMinutes: row.runtimeMinutes === null ? null : Number(row.runtimeMinutes),
-  posterUrl: row.posterUrl || null,
-  genre: row.genre || null,
-  plot: row.plot || null,
-  category: row.category || null,
-  addedBy: row.addedBy ? row.addedBy.split(",") : [],
-  addedCount: row.addedCount === undefined ? 0 : Number(row.addedCount),
+const createInitialStore = (users) => {
+  const uniqueNames = Array.from(new Set(users.map((name) => name.trim()).filter(Boolean)));
+  const seededUsers = uniqueNames.map((name, index) => ({
+    id: index + 1,
+    name,
+    createdAt: nowIso(),
+  }));
+
+  return {
+    version: 1,
+    nextIds: {
+      user: seededUsers.length + 1,
+      movie: 1,
+      listEntry: 1,
+      session: 1,
+      sessionSwipe: 1,
+      match: 1,
+    },
+    users: seededUsers,
+    movies: [],
+    listEntries: [],
+    sessions: [],
+    sessionSwipes: [],
+    matches: [],
+  };
+};
+
+const sanitizeStore = (rawStore) => {
+  const empty = createInitialStore(seedUsers);
+  if (!rawStore || typeof rawStore !== "object") {
+    return empty;
+  }
+
+  const nextIds = {
+    ...empty.nextIds,
+    ...(rawStore.nextIds && typeof rawStore.nextIds === "object" ? rawStore.nextIds : {}),
+  };
+
+  return {
+    version: Number(rawStore.version) || 1,
+    nextIds: {
+      user: Number(nextIds.user) || empty.nextIds.user,
+      movie: Number(nextIds.movie) || empty.nextIds.movie,
+      listEntry: Number(nextIds.listEntry) || empty.nextIds.listEntry,
+      session: Number(nextIds.session) || empty.nextIds.session,
+      sessionSwipe: Number(nextIds.sessionSwipe) || empty.nextIds.sessionSwipe,
+      match: Number(nextIds.match) || empty.nextIds.match,
+    },
+    users: Array.isArray(rawStore.users) ? rawStore.users : [],
+    movies: Array.isArray(rawStore.movies) ? rawStore.movies : [],
+    listEntries: Array.isArray(rawStore.listEntries) ? rawStore.listEntries : [],
+    sessions: Array.isArray(rawStore.sessions) ? rawStore.sessions : [],
+    sessionSwipes: Array.isArray(rawStore.sessionSwipes) ? rawStore.sessionSwipes : [],
+    matches: Array.isArray(rawStore.matches) ? rawStore.matches : [],
+  };
+};
+
+const resolveConfiguredBlobUrl = () => {
+  if (process.env.JSONBLOB_URL?.trim()) {
+    return process.env.JSONBLOB_URL.trim();
+  }
+  if (process.env.JSONBLOB_ID?.trim()) {
+    return `${JSONBLOB_API_ROOT}/${process.env.JSONBLOB_ID.trim()}`;
+  }
+  return null;
+};
+
+const requestJsonBlob = async (url, options = {}) => {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`JSONBlob request failed (${response.status}): ${text || response.statusText}`);
+  }
+  return response;
+};
+
+const createBlob = async (initialStore) => {
+  const response = await requestJsonBlob(JSONBLOB_API_ROOT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(initialStore),
+  });
+
+  const location = response.headers.get("Location") || response.headers.get("location");
+  if (!location) {
+    throw new Error("JSONBlob did not return a Location header.");
+  }
+
+  if (location.startsWith("http://") || location.startsWith("https://")) {
+    return location;
+  }
+  return `https://jsonblob.com${location}`;
+};
+
+const fetchStoreFromBlob = async () => {
+  const response = await requestJsonBlob(blobUrl, {
+    headers: {
+      Accept: "application/json",
+    },
+  });
+  const raw = await response.json();
+  return sanitizeStore(raw);
+};
+
+const persistStoreToBlob = async (store) => {
+  await requestJsonBlob(blobUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(store),
+  });
+};
+
+const getStore = async ({ forceRefresh = false } = {}) => {
+  const shouldRefresh =
+    forceRefresh || !storeCache || Date.now() - cacheUpdatedAt > READ_REFRESH_MS;
+
+  if (shouldRefresh) {
+    storeCache = await fetchStoreFromBlob();
+    cacheUpdatedAt = Date.now();
+  }
+  return clone(storeCache);
+};
+
+const mutateStore = async (mutator) => {
+  const resultPromise = mutationQueue.then(async () => {
+    const currentStore = await getStore({ forceRefresh: true });
+    const draft = clone(currentStore);
+    const result = await mutator(draft);
+    await persistStoreToBlob(draft);
+    storeCache = draft;
+    cacheUpdatedAt = Date.now();
+    return result;
+  });
+
+  mutationQueue = resultPromise.catch(() => {});
+  return resultPromise;
+};
+
+const nextId = (store, key) => {
+  const id = store.nextIds[key];
+  store.nextIds[key] = id + 1;
+  return id;
+};
+
+const mapMovieWithStats = (movie, stats) => ({
+  id: movie.id,
+  title: movie.title,
+  year: movie.year || null,
+  imdbId: movie.imdbId || null,
+  imdbRating: movie.imdbRating === null || movie.imdbRating === undefined ? null : Number(movie.imdbRating),
+  runtimeMinutes:
+    movie.runtimeMinutes === null || movie.runtimeMinutes === undefined
+      ? null
+      : Number(movie.runtimeMinutes),
+  posterUrl: movie.posterUrl || null,
+  genre: movie.genre || null,
+  plot: movie.plot || null,
+  category: stats?.category || null,
+  addedBy: stats?.addedBy || [],
+  addedCount: stats?.addedCount || 0,
 });
 
-const getSessionState = (sessionId) => {
-  const session = db
-    .prepare("SELECT id, category, created_at AS createdAt FROM sessions WHERE id = ?")
-    .get(sessionId);
+const buildLibraryRows = (store, category = null) => {
+  const usersById = new Map(store.users.map((user) => [user.id, user]));
+  const moviesById = new Map(store.movies.map((movie) => [movie.id, movie]));
+  const grouped = new Map();
 
+  for (const entry of store.listEntries) {
+    if (category && entry.category !== category) {
+      continue;
+    }
+    const movie = moviesById.get(entry.movieId);
+    const user = usersById.get(entry.userId);
+    if (!movie || !user) {
+      continue;
+    }
+
+    const key = `${entry.movieId}:${entry.category}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        movie,
+        category: entry.category,
+        addedBySet: new Set(),
+        addedCount: 0,
+      });
+    }
+
+    const group = grouped.get(key);
+    group.addedBySet.add(user.name);
+    group.addedCount += 1;
+  }
+
+  return Array.from(grouped.values())
+    .map((group) =>
+      mapMovieWithStats(group.movie, {
+        category: group.category,
+        addedBy: Array.from(group.addedBySet),
+        addedCount: group.addedCount,
+      }),
+    )
+    .sort((a, b) => {
+      if (a.category !== b.category) {
+        return a.category.localeCompare(b.category);
+      }
+      if (a.addedCount !== b.addedCount) {
+        return b.addedCount - a.addedCount;
+      }
+      return a.title.localeCompare(b.title);
+    });
+};
+
+const getSessionStateFromStore = (store, sessionId) => {
+  const session = store.sessions.find((row) => row.id === sessionId);
   if (!session) {
     return null;
   }
 
-  const users = db.prepare("SELECT id, name FROM users ORDER BY id ASC").all();
-  const queueRows = db.prepare(movieQueryByCategory).all(session.category);
-  const swipeRows = db
-    .prepare(
-      `
-        SELECT
-          user_id AS userId,
-          movie_id AS movieId,
-          liked
-        FROM session_swipes
-        WHERE session_id = ?
-      `,
-    )
-    .all(sessionId);
-  const matchRows = db
-    .prepare("SELECT movie_id AS movieId FROM matches WHERE session_id = ?")
-    .all(sessionId);
-  const matches = db
-    .prepare(
-      `
-        SELECT
-          m.id,
-          m.title,
-          m.year,
-          m.imdb_id AS imdbId,
-          m.imdb_rating AS imdbRating,
-          m.runtime_minutes AS runtimeMinutes,
-          m.poster_url AS posterUrl,
-          m.genre,
-          m.plot
-        FROM matches mt
-        JOIN movies m ON m.id = mt.movie_id
-        WHERE mt.session_id = ?
-        ORDER BY mt.created_at DESC
-      `,
-    )
-    .all(sessionId)
-    .map(mapMovieRow);
+  const users = [...store.users]
+    .sort((a, b) => a.id - b.id)
+    .map((user) => ({ id: user.id, name: user.name }));
 
-  const swipeMap = {};
-  for (const swipe of swipeRows) {
-    if (!swipeMap[swipe.movieId]) {
-      swipeMap[swipe.movieId] = {};
+  const queue = buildLibraryRows(store, session.category).map((movie) => ({
+    ...movie,
+    swipes: {},
+    matched: false,
+  }));
+  const queueByMovieId = new Map(queue.map((movie) => [movie.id, movie]));
+
+  for (const swipe of store.sessionSwipes) {
+    if (swipe.sessionId !== sessionId) {
+      continue;
     }
-    swipeMap[swipe.movieId][swipe.userId] = Boolean(swipe.liked);
+    const queueMovie = queueByMovieId.get(swipe.movieId);
+    if (!queueMovie) {
+      continue;
+    }
+    queueMovie.swipes[swipe.userId] = Boolean(swipe.liked);
   }
 
-  const matchedMovieIds = new Set(matchRows.map((row) => row.movieId));
-  const queue = queueRows.map((row) => ({
-    ...mapMovieRow(row),
-    swipes: swipeMap[row.id] || {},
-    matched: matchedMovieIds.has(row.id),
-  }));
+  const matches = [];
+  const matchesForSession = store.matches
+    .filter((match) => match.sessionId === sessionId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const moviesById = new Map(store.movies.map((movie) => [movie.id, movie]));
+
+  for (const match of matchesForSession) {
+    const matchedMovie = queueByMovieId.get(match.movieId);
+    if (matchedMovie) {
+      matchedMovie.matched = true;
+    }
+    const movie = moviesById.get(match.movieId);
+    if (movie) {
+      matches.push(mapMovieWithStats(movie));
+    }
+  }
 
   return {
-    session,
+    session: {
+      id: session.id,
+      category: session.category,
+      createdAt: session.createdAt,
+    },
     users,
     queue,
     matches,
   };
 };
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
+app.use(cors());
+app.use(express.json());
+
+app.get("/api/health", async (_req, res) => {
+  try {
+    await getStore();
+    res.json({ ok: true });
+  } catch (_error) {
+    res.status(500).json({ ok: false });
+  }
 });
 
-app.get("/api/users", (_req, res) => {
-  const users = db.prepare("SELECT id, name FROM users ORDER BY id ASC").all();
-  res.json(users);
+app.get("/api/users", async (_req, res) => {
+  try {
+    const store = await getStore();
+    const users = [...store.users]
+      .sort((a, b) => a.id - b.id)
+      .map((user) => ({ id: user.id, name: user.name }));
+    res.json(users);
+  } catch (_error) {
+    res.status(500).json({ error: "Unable to read users." });
+  }
 });
 
-app.post("/api/users", (req, res) => {
+app.post("/api/users", async (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) {
     return res.status(400).json({ error: "Name is required." });
@@ -230,47 +351,39 @@ app.post("/api/users", (req, res) => {
   }
 
   try {
-    const result = db.prepare("INSERT INTO users (name) VALUES (?)").run(name);
-    const user = db.prepare("SELECT id, name FROM users WHERE id = ?").get(result.lastInsertRowid);
+    const user = await mutateStore((store) => {
+      const exists = store.users.some((row) => row.name.toLowerCase() === name.toLowerCase());
+      if (exists) {
+        const error = new Error("That user already exists.");
+        error.code = "CONFLICT";
+        throw error;
+      }
+      const created = {
+        id: nextId(store, "user"),
+        name,
+        createdAt: nowIso(),
+      };
+      store.users.push(created);
+      return { id: created.id, name: created.name };
+    });
     return res.status(201).json(user);
   } catch (error) {
-    if (String(error.message).includes("UNIQUE")) {
-      return res.status(409).json({ error: "That user already exists." });
+    if (error.code === "CONFLICT") {
+      return res.status(409).json({ error: error.message });
     }
     return res.status(500).json({ error: "Unable to create user." });
   }
 });
 
-app.get("/api/library", (req, res) => {
+app.get("/api/library", async (req, res) => {
   const category = req.query.category ? normalizeCategory(req.query.category) : null;
-
-  let sql = `
-    SELECT
-      m.id,
-      m.title,
-      m.year,
-      m.imdb_id AS imdbId,
-      m.imdb_rating AS imdbRating,
-      m.runtime_minutes AS runtimeMinutes,
-      m.poster_url AS posterUrl,
-      m.genre,
-      m.plot,
-      le.category,
-      GROUP_CONCAT(DISTINCT u.name) AS addedBy,
-      COUNT(le.id) AS addedCount
-    FROM list_entries le
-    JOIN movies m ON m.id = le.movie_id
-    JOIN users u ON u.id = le.user_id
-  `;
-  const params = [];
-  if (category) {
-    sql += " WHERE le.category = ?";
-    params.push(category);
+  try {
+    const store = await getStore();
+    const rows = buildLibraryRows(store, category);
+    res.json(rows);
+  } catch (_error) {
+    res.status(500).json({ error: "Unable to read library." });
   }
-  sql += " GROUP BY m.id, le.category ORDER BY le.category ASC, addedCount DESC, m.title COLLATE NOCASE ASC";
-
-  const rows = db.prepare(sql).all(...params).map(mapMovieRow);
-  res.json(rows);
 });
 
 app.post("/api/movies/lookup", async (req, res) => {
@@ -292,7 +405,6 @@ app.post("/api/movies/lookup", async (req, res) => {
     if (!response.ok) {
       return res.status(502).json({ error: "Could not reach OMDb right now." });
     }
-
     const payload = await response.json();
     if (payload.Response === "False") {
       return res.status(404).json({ error: payload.Error || "Movie not found." });
@@ -314,7 +426,7 @@ app.post("/api/movies/lookup", async (req, res) => {
   }
 });
 
-app.post("/api/library", (req, res) => {
+app.post("/api/library", async (req, res) => {
   const userId = Number(req.body?.userId);
   const category = normalizeCategory(req.body?.category);
   const title = String(req.body?.title || "").trim();
@@ -324,11 +436,6 @@ app.post("/api/library", (req, res) => {
   }
   if (!title) {
     return res.status(400).json({ error: "Movie title is required." });
-  }
-
-  const user = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
-  if (!user) {
-    return res.status(404).json({ error: "User not found." });
   }
 
   const year = req.body?.year ? String(req.body.year).trim() : null;
@@ -342,157 +449,118 @@ app.post("/api/library", (req, res) => {
   const genre = req.body?.genre ? String(req.body.genre).trim() : null;
   const plot = req.body?.plot ? String(req.body.plot).trim() : null;
 
-  const insertMovie = db.prepare(
-    `
-      INSERT INTO movies (
-        title,
-        year,
-        imdb_id,
-        imdb_rating,
-        runtime_minutes,
-        poster_url,
-        genre,
-        plot
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-  );
-  const updateMovie = db.prepare(
-    `
-      UPDATE movies
-      SET
-        title = ?,
-        year = ?,
-        imdb_rating = ?,
-        runtime_minutes = ?,
-        poster_url = ?,
-        genre = ?,
-        plot = ?
-      WHERE id = ?
-    `,
-  );
-  const getMovieByImdb = db.prepare("SELECT id FROM movies WHERE imdb_id = ?");
-  const getMovieByTitleYear = db.prepare(
-    `
-      SELECT id
-      FROM movies
-      WHERE LOWER(title) = LOWER(?)
-      AND COALESCE(year, '') = COALESCE(?, '')
-      LIMIT 1
-    `,
-  );
-  const linkMovie = db.prepare(
-    "INSERT OR IGNORE INTO list_entries (user_id, movie_id, category) VALUES (?, ?, ?)",
-  );
-  const getLibraryMovie = db.prepare(
-    `
-      SELECT
-        m.id,
-        m.title,
-        m.year,
-        m.imdb_id AS imdbId,
-        m.imdb_rating AS imdbRating,
-        m.runtime_minutes AS runtimeMinutes,
-        m.poster_url AS posterUrl,
-        m.genre,
-        m.plot,
-        le.category,
-        GROUP_CONCAT(DISTINCT u.name) AS addedBy,
-        COUNT(le.id) AS addedCount
-      FROM movies m
-      JOIN list_entries le ON le.movie_id = m.id
-      JOIN users u ON u.id = le.user_id
-      WHERE m.id = ? AND le.category = ?
-      GROUP BY m.id, le.category
-    `,
-  );
-
-  const transaction = db.transaction(() => {
-    let movieId = null;
-
-    if (imdbId) {
-      const existing = getMovieByImdb.get(imdbId);
-      if (existing) {
-        movieId = existing.id;
-        updateMovie.run(
-          title,
-          year,
-          Number.isFinite(imdbRating) ? imdbRating : null,
-          runtimeMinutes,
-          posterUrl,
-          genre,
-          plot,
-          movieId,
-        );
-      } else {
-        const result = insertMovie.run(
-          title,
-          year,
-          imdbId,
-          Number.isFinite(imdbRating) ? imdbRating : null,
-          runtimeMinutes,
-          posterUrl,
-          genre,
-          plot,
-        );
-        movieId = result.lastInsertRowid;
-      }
-    } else {
-      const existing = getMovieByTitleYear.get(title, year);
-      if (existing) {
-        movieId = existing.id;
-      } else {
-        const result = insertMovie.run(
-          title,
-          year,
-          null,
-          Number.isFinite(imdbRating) ? imdbRating : null,
-          runtimeMinutes,
-          posterUrl,
-          genre,
-          plot,
-        );
-        movieId = result.lastInsertRowid;
-      }
-    }
-
-    const linkResult = linkMovie.run(userId, movieId, category);
-    const movie = getLibraryMovie.get(movieId, category);
-    return {
-      movie: movie ? mapMovieRow(movie) : null,
-      alreadyInList: linkResult.changes === 0,
-    };
-  });
-
   try {
-    const result = transaction();
+    const result = await mutateStore((store) => {
+      const user = store.users.find((row) => row.id === userId);
+      if (!user) {
+        const error = new Error("User not found.");
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+
+      let movie = null;
+      if (imdbId) {
+        movie = store.movies.find((row) => row.imdbId === imdbId) || null;
+      } else {
+        movie =
+          store.movies.find(
+            (row) =>
+              row.title.toLowerCase() === title.toLowerCase() &&
+              (row.year || "") === (year || ""),
+          ) || null;
+      }
+
+      if (movie) {
+        movie.title = title;
+        movie.year = year;
+        movie.imdbId = imdbId || movie.imdbId || null;
+        movie.imdbRating = Number.isFinite(imdbRating) ? imdbRating : null;
+        movie.runtimeMinutes = runtimeMinutes;
+        movie.posterUrl = posterUrl;
+        movie.genre = genre;
+        movie.plot = plot;
+      } else {
+        movie = {
+          id: nextId(store, "movie"),
+          title,
+          year,
+          imdbId: imdbId || null,
+          imdbRating: Number.isFinite(imdbRating) ? imdbRating : null,
+          runtimeMinutes,
+          posterUrl,
+          genre,
+          plot,
+          createdAt: nowIso(),
+        };
+        store.movies.push(movie);
+      }
+
+      const existingEntry = store.listEntries.find(
+        (entry) => entry.userId === userId && entry.movieId === movie.id && entry.category === category,
+      );
+      if (!existingEntry) {
+        store.listEntries.push({
+          id: nextId(store, "listEntry"),
+          userId,
+          movieId: movie.id,
+          category,
+          createdAt: nowIso(),
+        });
+      }
+
+      const libraryRows = buildLibraryRows(store, category);
+      const libraryMovie = libraryRows.find((row) => row.id === movie.id) || null;
+      return {
+        movie: libraryMovie,
+        alreadyInList: Boolean(existingEntry),
+      };
+    });
     return res.status(201).json(result);
-  } catch (_error) {
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ error: error.message });
+    }
     return res.status(500).json({ error: "Could not add this movie to your list." });
   }
 });
 
-app.post("/api/sessions/start", (req, res) => {
+app.post("/api/sessions/start", async (req, res) => {
   const category = normalizeCategory(req.body?.category);
-  const result = db.prepare("INSERT INTO sessions (category) VALUES (?)").run(category);
-  const state = getSessionState(result.lastInsertRowid);
-  res.status(201).json(state);
+  try {
+    const state = await mutateStore((store) => {
+      const session = {
+        id: nextId(store, "session"),
+        category,
+        createdAt: nowIso(),
+      };
+      store.sessions.push(session);
+      return getSessionStateFromStore(store, session.id);
+    });
+    res.status(201).json(state);
+  } catch (_error) {
+    res.status(500).json({ error: "Unable to start session." });
+  }
 });
 
-app.get("/api/sessions/:sessionId/state", (req, res) => {
+app.get("/api/sessions/:sessionId/state", async (req, res) => {
   const sessionId = Number(req.params.sessionId);
   if (!Number.isInteger(sessionId) || sessionId <= 0) {
     return res.status(400).json({ error: "Invalid session id." });
   }
 
-  const state = getSessionState(sessionId);
-  if (!state) {
-    return res.status(404).json({ error: "Session not found." });
+  try {
+    const store = await getStore();
+    const state = getSessionStateFromStore(store, sessionId);
+    if (!state) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+    return res.json(state);
+  } catch (_error) {
+    return res.status(500).json({ error: "Unable to load session state." });
   }
-
-  return res.json(state);
 });
 
-app.post("/api/sessions/:sessionId/swipe", (req, res) => {
+app.post("/api/sessions/:sessionId/swipe", async (req, res) => {
   const sessionId = Number(req.params.sessionId);
   const userId = Number(req.body?.userId);
   const movieId = Number(req.body?.movieId);
@@ -508,87 +576,133 @@ app.post("/api/sessions/:sessionId/swipe", (req, res) => {
     return res.status(400).json({ error: "A valid movie is required." });
   }
 
-  const session = db.prepare("SELECT id FROM sessions WHERE id = ?").get(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: "Session not found." });
+  try {
+    const payload = await mutateStore((store) => {
+      const session = store.sessions.find((row) => row.id === sessionId);
+      if (!session) {
+        const error = new Error("Session not found.");
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+      const user = store.users.find((row) => row.id === userId);
+      if (!user) {
+        const error = new Error("User not found.");
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+      const movie = store.movies.find((row) => row.id === movieId);
+      if (!movie) {
+        const error = new Error("Movie not found.");
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+
+      const existingSwipe = store.sessionSwipes.find(
+        (swipe) => swipe.sessionId === sessionId && swipe.userId === userId && swipe.movieId === movieId,
+      );
+      if (existingSwipe) {
+        existingSwipe.liked = liked;
+        existingSwipe.createdAt = nowIso();
+      } else {
+        store.sessionSwipes.push({
+          id: nextId(store, "sessionSwipe"),
+          sessionId,
+          userId,
+          movieId,
+          liked,
+          createdAt: nowIso(),
+        });
+      }
+
+      const totalUsers = store.users.length;
+      const yesCount = store.sessionSwipes.filter(
+        (swipe) => swipe.sessionId === sessionId && swipe.movieId === movieId && swipe.liked,
+      ).length;
+
+      let newlyMatched = false;
+      if (totalUsers > 0 && yesCount === totalUsers) {
+        const existingMatch = store.matches.find(
+          (match) => match.sessionId === sessionId && match.movieId === movieId,
+        );
+        if (!existingMatch) {
+          store.matches.push({
+            id: nextId(store, "match"),
+            sessionId,
+            movieId,
+            createdAt: nowIso(),
+          });
+          newlyMatched = true;
+        }
+      }
+
+      return {
+        matched: newlyMatched,
+        state: getSessionStateFromStore(store, sessionId),
+      };
+    });
+    return res.json(payload);
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ error: error.message });
+    }
+    return res.status(500).json({ error: "Unable to save swipe." });
   }
-
-  const user = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
-  if (!user) {
-    return res.status(404).json({ error: "User not found." });
-  }
-
-  db.prepare(
-    `
-      INSERT INTO session_swipes (
-        session_id,
-        user_id,
-        movie_id,
-        liked
-      ) VALUES (?, ?, ?, ?)
-      ON CONFLICT (session_id, user_id, movie_id)
-      DO UPDATE SET liked = excluded.liked, created_at = CURRENT_TIMESTAMP
-    `,
-  ).run(sessionId, userId, movieId, liked ? 1 : 0);
-
-  const totalUsers = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
-  const yesCount = db
-    .prepare(
-      `
-        SELECT COUNT(*) AS count
-        FROM session_swipes
-        WHERE session_id = ? AND movie_id = ? AND liked = 1
-      `,
-    )
-    .get(sessionId, movieId).count;
-
-  let newlyMatched = false;
-  if (totalUsers > 0 && yesCount === totalUsers) {
-    const matchInsert = db
-      .prepare("INSERT OR IGNORE INTO matches (session_id, movie_id) VALUES (?, ?)")
-      .run(sessionId, movieId);
-    newlyMatched = matchInsert.changes > 0;
-  }
-
-  const state = getSessionState(sessionId);
-  return res.json({
-    matched: newlyMatched,
-    state,
-  });
 });
 
-app.get("/api/sessions/:sessionId/matches", (req, res) => {
+app.get("/api/sessions/:sessionId/matches", async (req, res) => {
   const sessionId = Number(req.params.sessionId);
   if (!Number.isInteger(sessionId) || sessionId <= 0) {
     return res.status(400).json({ error: "Invalid session id." });
   }
 
-  const rows = db
-    .prepare(
-      `
-        SELECT
-          m.id,
-          m.title,
-          m.year,
-          m.imdb_id AS imdbId,
-          m.imdb_rating AS imdbRating,
-          m.runtime_minutes AS runtimeMinutes,
-          m.poster_url AS posterUrl,
-          m.genre,
-          m.plot
-        FROM matches mt
-        JOIN movies m ON m.id = mt.movie_id
-        WHERE mt.session_id = ?
-        ORDER BY mt.created_at DESC
-      `,
-    )
-    .all(sessionId)
-    .map(mapMovieRow);
+  try {
+    const store = await getStore();
+    const session = store.sessions.find((row) => row.id === sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
 
-  res.json(rows);
+    const moviesById = new Map(store.movies.map((movie) => [movie.id, movie]));
+    const matches = store.matches
+      .filter((row) => row.sessionId === sessionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((row) => moviesById.get(row.movieId))
+      .filter(Boolean)
+      .map((movie) => mapMovieWithStats(movie));
+
+    return res.json(matches);
+  } catch (_error) {
+    return res.status(500).json({ error: "Unable to load matches." });
+  }
 });
 
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Movie Night Matcher API running on http://localhost:${PORT}`);
-});
+const start = async () => {
+  try {
+    const configuredUrl = resolveConfiguredBlobUrl();
+    if (configuredUrl) {
+      blobUrl = configuredUrl;
+      storeCache = await fetchStoreFromBlob();
+      cacheUpdatedAt = Date.now();
+    } else {
+      const initialStore = createInitialStore(seedUsers);
+      blobUrl = await createBlob(initialStore);
+      storeCache = initialStore;
+      cacheUpdatedAt = Date.now();
+      // eslint-disable-next-line no-console
+      console.log(`Created JSONBlob store at: ${blobUrl}`);
+      // eslint-disable-next-line no-console
+      console.log("Set JSONBLOB_ID or JSONBLOB_URL in server/.env to reuse this data.");
+    }
+
+    app.listen(PORT, () => {
+      // eslint-disable-next-line no-console
+      console.log(`Movie Night Matcher API running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("Failed to initialize JSONBlob store:", error.message);
+    process.exit(1);
+  }
+};
+
+start();
