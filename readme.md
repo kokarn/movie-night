@@ -130,6 +130,8 @@ A full-stack web app for couples (or friends) to:
 ### GitHub Pages deployment
 
 - This repo includes a workflow at `.github/workflows/deploy-pages.yml` that deploys the `web/` app to GitHub Pages on pushes to `main`.
+- In repository settings, go to **Settings → Pages → Build and deployment** and set **Source** to **GitHub Actions**.
+  - If Source is left in legacy branch mode (for example `main` + `/`), GitHub Pages will render `readme.md` instead of the built React app.
 - The site URL will be:
   - `https://kokarn.github.io/movie-night/`
 - For API calls in production, set a repository variable named `VITE_API_BASE_URL` (for example your deployed backend URL).  
