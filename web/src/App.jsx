@@ -20,7 +20,7 @@ const SUGGESTION_LIMIT = 8;
 
 const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.PROD ? "http://movie-api.kokarn.com/" : "")
+  (import.meta.env.PROD ? "https://movie-api.kokarn.com/" : "")
 ).replace(/\/$/, "");
 
 const requestJson = async (url, options = {}) => {
