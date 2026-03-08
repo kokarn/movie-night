@@ -17,6 +17,8 @@ const EMPTY_FORM = {
   plot: "",
 };
 const SUGGESTION_LIMIT = 8;
+const ADDER_OPTIONS = ["Oskar", "Jasmina"];
+const ADDER_STORAGE_KEY = "movie-night.adder-name";
 
 const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
@@ -83,11 +85,17 @@ const getLatestMatch = (state) => (state?.matches?.length ? state.matches[0] : n
 
 function App() {
   const [users, setUsers] = useState([]);
-  const [newUserName, setNewUserName] = useState("");
   const [library, setLibrary] = useState([]);
   const [activeTab, setActiveTab] = useState("library");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [adderName, setAdderName] = useState(() => {
+    if (typeof window === "undefined") {
+      return ADDER_OPTIONS[0];
+    }
+    const stored = window.localStorage.getItem(ADDER_STORAGE_KEY);
+    return ADDER_OPTIONS.includes(stored) ? stored : ADDER_OPTIONS[0];
+  });
 
   const [form, setForm] = useState({
     userId: "",
@@ -127,6 +135,17 @@ function App() {
     () => CATEGORIES.find((category) => category.value === form.category) || CATEGORIES[0],
     [form.category],
   );
+  const preferredAdderUser = useMemo(() => {
+    const byName = users.find((user) => user.name.toLowerCase() === adderName.toLowerCase());
+    if (byName) {
+      return byName;
+    }
+    return (
+      users.find((user) =>
+        ADDER_OPTIONS.some((option) => option.toLowerCase() === user.name.toLowerCase()),
+      ) || null
+    );
+  }, [adderName, users]);
 
   const applySessionState = useCallback((state, { suppressMatchPopup = false } = {}) => {
     const incomingSessionId = state?.session?.id || null;
@@ -169,14 +188,23 @@ function App() {
   }, []);
 
   const loadUsers = useCallback(async () => {
-    const payload = await requestJson("/api/users");
-    setUsers(payload);
+    let payload = await requestJson("/api/users");
+    const existingNames = new Set(payload.map((user) => user.name.toLowerCase()));
+    const missingAdders = ADDER_OPTIONS.filter((name) => !existingNames.has(name.toLowerCase()));
 
-    setForm((current) =>
-      current.userId || !payload.length
-        ? current
-        : { ...current, userId: String(payload[0].id) },
-    );
+    if (missingAdders.length) {
+      await Promise.all(
+        missingAdders.map((name) =>
+          requestJson("/api/users", {
+            method: "POST",
+            body: JSON.stringify({ name }),
+          }).catch(() => null),
+        ),
+      );
+      payload = await requestJson("/api/users");
+    }
+
+    setUsers(payload);
     setSelectedUserId((current) => (current || !payload.length ? current : payload[0].id));
   }, []);
 
@@ -234,28 +262,6 @@ function App() {
   const resetMessages = () => {
     setErrorMessage("");
     setStatusMessage("");
-  };
-
-  const addUser = async (event) => {
-    event.preventDefault();
-    resetMessages();
-
-    if (!newUserName.trim()) {
-      setErrorMessage("Enter a name first.");
-      return;
-    }
-
-    try {
-      await requestJson("/api/users", {
-        method: "POST",
-        body: JSON.stringify({ name: newUserName.trim() }),
-      });
-      setNewUserName("");
-      await loadUsers();
-      setStatusMessage("User added.");
-    } catch (error) {
-      setErrorMessage(error.message);
-    }
   };
 
   const applyLookupPayload = useCallback((payload) => {
@@ -331,6 +337,22 @@ function App() {
       clearTimeout(timeoutId);
     };
   }, [form.title]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(ADDER_STORAGE_KEY, adderName);
+    }
+  }, [adderName]);
+
+  useEffect(() => {
+    if (!preferredAdderUser) {
+      return;
+    }
+    setForm((current) => ({
+      ...current,
+      userId: String(preferredAdderUser.id),
+    }));
+  }, [preferredAdderUser]);
 
   const addMovie = async (event) => {
     event.preventDefault();
@@ -517,6 +539,49 @@ function App() {
   );
   const currentMovie =
     sessionState && currentMovieIndex >= 0 ? sessionState.queue[currentMovieIndex] : null;
+  const swipeProgress = useMemo(() => {
+    const queue = sessionState?.queue || [];
+    const sessionUsers = sessionState?.users || [];
+    if (!queue.length || !selectedUserId) {
+      return { myPendingSwipeCount: 0, othersPendingSwipeCount: 0 };
+    }
+
+    let myPendingSwipeCount = 0;
+    let othersPendingSwipeCount = 0;
+
+    for (const movie of queue) {
+      if (movie.matched) {
+        continue;
+      }
+
+      const mySwipe = movie.swipes?.[selectedUserId];
+      if (mySwipe === undefined) {
+        myPendingSwipeCount += 1;
+        continue;
+      }
+
+      const othersMissingSwipe = sessionUsers.some(
+        (user) => user.id !== selectedUserId && movie.swipes?.[user.id] === undefined,
+      );
+      if (othersMissingSwipe) {
+        othersPendingSwipeCount += 1;
+      }
+    }
+
+    return { myPendingSwipeCount, othersPendingSwipeCount };
+  }, [sessionState?.queue, sessionState?.users, selectedUserId]);
+  const isDeckCompleteForMe = Boolean(
+    sessionState && !currentMovie && selectedUserId && swipeProgress.myPendingSwipeCount === 0,
+  );
+  const isWaitingForOthers = isDeckCompleteForMe && swipeProgress.othersPendingSwipeCount > 0;
+  const isNoMatchOutcome =
+    isDeckCompleteForMe &&
+    swipeProgress.othersPendingSwipeCount === 0 &&
+    (sessionState?.matches?.length || 0) === 0;
+  const isDeckFinishedWithMatches =
+    isDeckCompleteForMe &&
+    swipeProgress.othersPendingSwipeCount === 0 &&
+    (sessionState?.matches?.length || 0) > 0;
 
   return (
     <main className="app-shell">
@@ -570,15 +635,6 @@ function App() {
         <section className="layout-two-columns">
           <article className="panel">
             <h2>Add movie</h2>
-            <form onSubmit={addUser} className="inline-form">
-              <input
-                value={newUserName}
-                onChange={(event) => setNewUserName(event.target.value)}
-                placeholder="Add person (optional)"
-              />
-              <button type="submit">Add person</button>
-            </form>
-
             <form onSubmit={addMovie} className="stack-form">
               <div className="list-type-section">
                 <p className="list-type-label">Add to list type</p>
@@ -602,6 +658,24 @@ function App() {
                   ))}
                 </div>
                 <p className="muted form-help">Movies added now go to: {selectedCategory.label}</p>
+              </div>
+
+              <div className="list-type-section">
+                <p className="list-type-label">Adding as</p>
+                <div className="list-type-tabs" role="tablist" aria-label="Choose who is adding">
+                  {ADDER_OPTIONS.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      role="tab"
+                      aria-selected={adderName === name}
+                      className={adderName === name ? "list-type-tab active" : "list-type-tab"}
+                      onClick={() => setAdderName(name)}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <label>
@@ -778,7 +852,24 @@ function App() {
                 No movies in this category yet. Add some in the shared list tab first.
               </p>
             ) : !currentMovie ? (
-              <p className="muted">All movies are swiped. Check your matches below.</p>
+              isWaitingForOthers ? (
+                <div className="swipe-terminal-state waiting" role="status" aria-live="polite">
+                  <span className="waiting-spinner" aria-hidden="true" />
+                  <p className="muted">
+                    You&apos;ve swiped all movies. Waiting for the other person to finish...
+                  </p>
+                </div>
+              ) : isNoMatchOutcome ? (
+                <p className="muted swipe-terminal-state">
+                  No shared picks this round. Start a new swipe session or add more movies.
+                </p>
+              ) : isDeckFinishedWithMatches ? (
+                <p className="muted swipe-terminal-state">
+                  Swiping is complete. Check your matches below.
+                </p>
+              ) : (
+                <p className="muted swipe-terminal-state">All movies are swiped. Check your matches below.</p>
+              )
             ) : (
               <div className="swipe-card">
                 <div className="swipe-media">
