@@ -70,6 +70,8 @@
 }
 
 .panel {
+  position: relative;
+  z-index: 0;
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 1.1rem;
@@ -77,6 +79,10 @@
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(16px);
   animation: rise-in 550ms ease;
+}
+
+.panel-autocomplete-active {
+  z-index: 40;
 }
 
 .panel h2 {
@@ -157,7 +163,9 @@
   background: rgba(8, 19, 38, 0.97);
   box-shadow: 0 16px 30px rgba(3, 10, 23, 0.55);
   z-index: 20;
-  overflow: hidden;
+  overflow-y: auto;
+  max-height: min(22rem, 52vh);
+  overscroll-behavior: contain;
 }
 
 .autocomplete-list {
@@ -616,6 +624,14 @@ small {
 
   .swipe-actions {
     flex-direction: row;
+  }
+}
+
+@media (max-width: 619px) {
+  .autocomplete-menu {
+    top: auto;
+    bottom: calc(100% + 0.42rem);
+    max-height: min(18rem, 46vh);
   }
 }
 
