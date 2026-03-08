@@ -1,0 +1,128 @@
+name: Require working demo in PR
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate-demo:
+    name: Validate PR demo section
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate PR body contains a working demo
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request?.body ?? "";
+            const isDraft = context.payload.pull_request?.draft ?? false;
+
+            // Let draft PRs iterate freely; enforce at ready-for-review and onward.
+            if (isDraft) {
+              core.notice("Draft PR detected. Demo check is skipped until PR is ready for review.");
+              return;
+            }
+
+            const errors = [];
+            const URL_REGEX = /https?:\/\/[^\s)]+/gi;
+            const STEP_REGEX = /(^|\n)\s*(?:\d+\.|[-*])\s+\S+/;
+
+            function sectionContent(markdown, heading) {
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const sectionRegex = new RegExp(
+                `(^|\\n)##\\s*${escaped}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`,
+                "i"
+              );
+              const match = markdown.match(sectionRegex);
+              return match ? match[2].trim() : null;
+            }
+
+            function looksLikePlaceholder(text) {
+              if (!text) return true;
+              const cleaned = text
+                .replace(/<!--([\s\S]*?)-->/g, "")
+                .replace(/[`*_~>#-]/g, " ")
+                .replace(/\d+\./g, " ")
+                .replace(/\s+/g, " ")
+                .trim()
+                .toLowerCase();
+              return (
+                cleaned.length === 0 ||
+                cleaned === "n/a" ||
+                cleaned === "na" ||
+                cleaned === "tbd" ||
+                cleaned === "todo"
+              );
+            }
+
+            const demoSection = sectionContent(body, "Working demo (required)");
+            if (demoSection === null) {
+              errors.push('Missing section: "## Working demo (required)".');
+            } else {
+              if (looksLikePlaceholder(demoSection)) {
+                errors.push('The "Working demo (required)" section is empty or placeholder-only.');
+              }
+
+              const urls = demoSection.match(URL_REGEX) ?? [];
+              const hasPublicDemoUrl = urls.some((url) => {
+                const lower = url.toLowerCase();
+                return !(
+                  lower.includes("localhost") ||
+                  lower.includes("127.0.0.1") ||
+                  lower.includes("example.com")
+                );
+              });
+
+              if (!hasPublicDemoUrl) {
+                errors.push(
+                  'Provide at least one public demo URL in "Working demo (required)" (no localhost/private placeholders).'
+                );
+              }
+            }
+
+            const verifySection = sectionContent(body, "How to verify (required)");
+            if (verifySection === null || looksLikePlaceholder(verifySection)) {
+              errors.push('Fill out "## How to verify (required)" with concrete verification steps.');
+            } else {
+              const hasStep = STEP_REGEX.test(verifySection);
+              if (!hasStep) {
+                errors.push('"How to verify (required)" must include at least one list step.');
+              }
+            }
+
+            const checklistSection = sectionContent(body, "Demo checklist");
+            if (checklistSection === null) {
+              errors.push('Missing section: "## Demo checklist".');
+            } else {
+              const checkedItems = checklistSection
+                .split("\n")
+                .map((line) => line.trim().toLowerCase())
+                .filter((line) => line.startsWith("- [x]"));
+              const hasCheckedDemo = checkedItems.some((line) =>
+                line.includes("i ran through the demo flow end-to-end and it works.")
+              );
+              const hasCheckedAccess = checkedItems.some((line) =>
+                line.includes("the demo link is publicly accessible to reviewers.")
+              );
+              if (!hasCheckedDemo || !hasCheckedAccess) {
+                errors.push(
+                  'In "Demo checklist", check both boxes after validating your working demo.'
+                );
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                `PR is missing a valid working demo.\\n\\n${errors.map((e) => `- ${e}`).join("\\n")}`
+              );
+            } else {
+              core.notice("Working demo requirements are satisfied.");
+            }
