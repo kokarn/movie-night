@@ -633,7 +633,7 @@ function App() {
 
       {activeTab === "library" ? (
         <section className="layout-two-columns">
-          <article className="panel">
+          <article className={suggestionsOpen ? "panel panel-autocomplete-active" : "panel"}>
             <h2>Add movie</h2>
             <form onSubmit={addMovie} className="stack-form">
               <div className="list-type-section">
