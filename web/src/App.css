@@ -155,7 +155,8 @@
 
 .autocomplete-menu {
   position: absolute;
-  top: calc(100% + 0.42rem);
+  top: auto;
+  bottom: calc(100% + 0.42rem);
   left: 0;
   right: 0;
   border: 1px solid rgba(132, 182, 240, 0.36);
@@ -629,8 +630,6 @@ small {
 
 @media (max-width: 619px) {
   .autocomplete-menu {
-    top: auto;
-    bottom: calc(100% + 0.42rem);
     max-height: min(18rem, 46vh);
   }
 }
