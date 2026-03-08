@@ -107,6 +107,7 @@ function App() {
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
+  const autocompleteMenuRef = useRef(null);
 
   const [nightCategory, setNightCategory] = useState("regular");
   const [joinCodeInput, setJoinCodeInput] = useState("");
@@ -343,6 +344,17 @@ function App() {
       window.localStorage.setItem(ADDER_STORAGE_KEY, adderName);
     }
   }, [adderName]);
+
+  useEffect(() => {
+    if (!suggestionsOpen || !titleSuggestions.length) {
+      return;
+    }
+
+    const menu = autocompleteMenuRef.current;
+    if (menu) {
+      menu.scrollTop = menu.scrollHeight;
+    }
+  }, [suggestionsOpen, titleSuggestions]);
 
   useEffect(() => {
     if (!preferredAdderUser) {
@@ -690,7 +702,7 @@ function App() {
                     autoComplete="off"
                   />
                   {suggestionsOpen ? (
-                    <div className="autocomplete-menu">
+                    <div ref={autocompleteMenuRef} className="autocomplete-menu">
                       {suggestionsLoading ? (
                         <p className="autocomplete-empty">Searching titles...</p>
                       ) : titleSuggestions.length ? (
