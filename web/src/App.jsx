@@ -695,7 +695,7 @@ function App() {
                         <p className="autocomplete-empty">Searching titles...</p>
                       ) : titleSuggestions.length ? (
                         <ul className="autocomplete-list">
-                          {titleSuggestions.map((movie) => (
+                          {[...titleSuggestions].reverse().map((movie) => (
                             <li key={movie.imdbId || `${movie.title}-${movie.year || "unknown"}`}>
                               <button
                                 type="button"
