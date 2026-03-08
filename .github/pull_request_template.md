@@ -7,6 +7,7 @@
 <!--
 Provide a PUBLIC demo URL that reviewers can open directly.
 Do not use localhost, 127.0.0.1, or private/internal links.
+If this PR has an auto-generated GitHub Pages preview, paste that URL here.
 -->
 
 - Demo URL:

@@ -127,14 +127,19 @@ A full-stack web app for couples (or friends) to:
 
 ---
 
-### GitHub Pages deployment
+### GitHub Pages deployment (production + PR previews)
 
-- This repo includes a workflow at `.github/workflows/deploy-pages.yml` that deploys the `web/` app to GitHub Pages on pushes to `main`.
-- In repository settings, go to **Settings → Pages → Build and deployment** and set **Source** to **GitHub Actions**.
-  - If Source is left in legacy branch mode (for example `main` + `/`), GitHub Pages will render `readme.md` instead of the built React app.
-- The site URL will be:
-  - `https://kokarn.github.io/movie-night/`
-- For API calls in production, set a repository variable named `VITE_API_BASE_URL` (for example your deployed backend URL).  
+- This repo includes:
+  - `.github/workflows/deploy-pages.yml` to deploy the main `web/` app on pushes to `main`.
+  - `.github/workflows/deploy-pr-preview.yml` to deploy/update a preview for each PR and remove it when the PR is closed.
+- In repository settings:
+  1. Go to **Settings → Pages → Build and deployment** and set **Source** to **Deploy from a branch**.
+  2. Set branch to **`gh-pages`** and folder to **`/ (root)`**.
+  3. Go to **Settings → Actions → General → Workflow permissions** and choose **Read and write permissions**.
+- URL formats:
+  - Production: `https://kokarn.github.io/movie-night/`
+  - PR previews: `https://kokarn.github.io/movie-night/pr-preview/pr-<number>/`
+- For API calls in deployed builds, set a repository variable named `VITE_API_BASE_URL` (for example your deployed backend URL).  
   If unset, the frontend uses relative `/api` paths (works for local dev with the Vite proxy).
 
 ---
