@@ -93,6 +93,10 @@
   margin-bottom: 1rem;
 }
 
+.join-session-form {
+  margin-top: 0.8rem;
+}
+
 .stack-form {
   display: flex;
   flex-direction: column;
@@ -168,8 +172,7 @@
 .autocomplete-item {
   width: 100%;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
   text-align: left;
   border: 1px solid transparent;
@@ -178,6 +181,40 @@
   border-radius: 0.6rem;
   padding: 0.55rem 0.62rem;
   font-weight: 600;
+}
+
+.autocomplete-poster {
+  width: 42px;
+  min-width: 42px;
+  height: 62px;
+  border-radius: 0.4rem;
+  object-fit: cover;
+  border: 1px solid rgba(142, 180, 232, 0.3);
+  background: rgba(10, 20, 40, 0.85);
+}
+
+.autocomplete-poster.placeholder {
+  display: grid;
+  place-items: center;
+  color: #a8bfdc;
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: center;
+  padding: 0.2rem;
+}
+
+.autocomplete-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.autocomplete-copy span {
+  display: block;
+  word-break: break-word;
 }
 
 .autocomplete-item:hover {
@@ -189,7 +226,7 @@
 
 .autocomplete-item small {
   color: #9cc4e2;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .autocomplete-empty {
@@ -374,6 +411,13 @@ button:disabled {
   letter-spacing: normal;
 }
 
+.selected-poster-preview {
+  margin-top: 0.1rem;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
 .session-meta {
   margin-top: 0.95rem;
   color: var(--text-secondary);
@@ -463,6 +507,42 @@ button:disabled {
 
 .matches {
   margin-top: 1rem;
+}
+
+.match-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 9, 21, 0.72);
+  backdrop-filter: blur(3px);
+  display: grid;
+  place-items: center;
+  z-index: 120;
+  padding: 1rem;
+}
+
+.match-popup {
+  width: min(100%, 420px);
+  border-radius: 1rem;
+  border: 1px solid rgba(123, 246, 206, 0.45);
+  background:
+    radial-gradient(circle at 20% 18%, rgba(42, 158, 128, 0.4), transparent 65%),
+    rgba(12, 34, 47, 0.97);
+  padding: 1.2rem;
+  box-shadow: 0 20px 44px rgba(2, 11, 20, 0.6);
+}
+
+.match-popup h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.4rem;
+}
+
+.match-popup p {
+  margin: 0 0 0.95rem;
+  color: #d7f5ec;
+}
+
+.match-popup button {
+  width: 100%;
 }
 
 small {

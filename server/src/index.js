@@ -1,6 +1,7 @@
 const cors = require("cors");
 const dotenv = require("dotenv");
 const express = require("express");
+const { randomBytes } = require("crypto");
 
 dotenv.config();
 
@@ -20,10 +21,29 @@ let blobUrl = null;
 let storeCache = null;
 let cacheUpdatedAt = 0;
 let mutationQueue = Promise.resolve();
+const sessionSubscribers = new Map();
 
 const READ_REFRESH_MS = 5000;
 
 const nowIso = () => new Date().toISOString();
+
+const normalizeJoinCode = (value) => String(value || "").trim().toUpperCase();
+
+const generateJoinCode = (store) => {
+  let attempts = 0;
+  while (attempts < 20) {
+    attempts += 1;
+    const code = randomBytes(4).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, 6).toUpperCase();
+    if (code.length < 6) {
+      continue;
+    }
+    const exists = store.sessions.some((session) => session.joinCode === code);
+    if (!exists) {
+      return code;
+    }
+  }
+  return `${Date.now().toString(36).toUpperCase().slice(-6)}`.padStart(6, "X");
+};
 
 const normalizeCategory = (category) =>
   category === "easy" || category === "easy-watching" ? "easy" : "regular";
@@ -96,7 +116,12 @@ const sanitizeStore = (rawStore) => {
     users: Array.isArray(rawStore.users) ? rawStore.users : [],
     movies: Array.isArray(rawStore.movies) ? rawStore.movies : [],
     listEntries: Array.isArray(rawStore.listEntries) ? rawStore.listEntries : [],
-    sessions: Array.isArray(rawStore.sessions) ? rawStore.sessions : [],
+    sessions: Array.isArray(rawStore.sessions)
+      ? rawStore.sessions.map((session) => ({
+          ...session,
+          joinCode: session.joinCode ? normalizeJoinCode(session.joinCode) : null,
+        }))
+      : [],
     sessionSwipes: Array.isArray(rawStore.sessionSwipes) ? rawStore.sessionSwipes : [],
     matches: Array.isArray(rawStore.matches) ? rawStore.matches : [],
   };
@@ -166,8 +191,17 @@ const getStore = async ({ forceRefresh = false } = {}) => {
     forceRefresh || !storeCache || Date.now() - cacheUpdatedAt > READ_REFRESH_MS;
 
   if (shouldRefresh) {
-    storeCache = await fetchStoreFromBlob();
-    cacheUpdatedAt = Date.now();
+    try {
+      storeCache = await fetchStoreFromBlob();
+      cacheUpdatedAt = Date.now();
+    } catch (error) {
+      if (!storeCache) {
+        throw error;
+      }
+      // eslint-disable-next-line no-console
+      console.warn("Using cached in-memory store; blob refresh failed:", error.message);
+      cacheUpdatedAt = Date.now();
+    }
   }
   return clone(storeCache);
 };
@@ -177,7 +211,14 @@ const mutateStore = async (mutator) => {
     const currentStore = await getStore({ forceRefresh: true });
     const draft = clone(currentStore);
     const result = await mutator(draft);
-    await persistStoreToBlob(draft);
+    if (blobUrl) {
+      try {
+        await persistStoreToBlob(draft);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn("Persist failed; continuing with in-memory store only:", error.message);
+      }
+    }
     storeCache = draft;
     cacheUpdatedAt = Date.now();
     return result;
@@ -277,7 +318,9 @@ const getSessionStateFromStore = (store, sessionId) => {
   }));
   const queueByMovieId = new Map(queue.map((movie) => [movie.id, movie]));
 
-  for (const swipe of store.sessionSwipes) {
+  const sessionSwipes = store.sessionSwipes.filter((swipe) => swipe.sessionId === sessionId);
+
+  for (const swipe of sessionSwipes) {
     if (swipe.sessionId !== sessionId) {
       continue;
     }
@@ -305,16 +348,52 @@ const getSessionStateFromStore = (store, sessionId) => {
     }
   }
 
+  const updatedAt = [session.createdAt, ...sessionSwipes.map((swipe) => swipe.createdAt), ...matchesForSession.map((match) => match.createdAt)].sort().at(-1);
+
   return {
     session: {
       id: session.id,
+      joinCode: session.joinCode || null,
       category: session.category,
       createdAt: session.createdAt,
+      updatedAt: updatedAt || session.createdAt,
     },
     users,
     queue,
     matches,
   };
+};
+
+const addSessionSubscriber = (sessionId, response) => {
+  const bucket = sessionSubscribers.get(sessionId) || new Set();
+  bucket.add(response);
+  sessionSubscribers.set(sessionId, bucket);
+};
+
+const removeSessionSubscriber = (sessionId, response) => {
+  const bucket = sessionSubscribers.get(sessionId);
+  if (!bucket) {
+    return;
+  }
+  bucket.delete(response);
+  if (bucket.size === 0) {
+    sessionSubscribers.delete(sessionId);
+  }
+};
+
+const sendSse = (response, event, data) => {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
+};
+
+const broadcastSessionEvent = (sessionId, event, data) => {
+  const bucket = sessionSubscribers.get(sessionId);
+  if (!bucket || bucket.size === 0) {
+    return;
+  }
+  for (const response of bucket) {
+    sendSse(response, event, data);
+  }
 };
 
 app.use(cors());
@@ -579,15 +658,36 @@ app.post("/api/sessions/start", async (req, res) => {
     const state = await mutateStore((store) => {
       const session = {
         id: nextId(store, "session"),
+        joinCode: generateJoinCode(store),
         category,
         createdAt: nowIso(),
       };
       store.sessions.push(session);
       return getSessionStateFromStore(store, session.id);
     });
+    broadcastSessionEvent(state.session.id, "state", state);
     res.status(201).json(state);
   } catch (_error) {
     res.status(500).json({ error: "Unable to start session." });
+  }
+});
+
+app.get("/api/sessions/by-code/:joinCode/state", async (req, res) => {
+  const joinCode = normalizeJoinCode(req.params.joinCode);
+  if (joinCode.length < 4) {
+    return res.status(400).json({ error: "Invalid join code." });
+  }
+
+  try {
+    const store = await getStore();
+    const session = store.sessions.find((row) => row.joinCode === joinCode);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+    const state = getSessionStateFromStore(store, session.id);
+    return res.json(state);
+  } catch (_error) {
+    return res.status(500).json({ error: "Unable to load session state." });
   }
 });
 
@@ -606,6 +706,44 @@ app.get("/api/sessions/:sessionId/state", async (req, res) => {
     return res.json(state);
   } catch (_error) {
     return res.status(500).json({ error: "Unable to load session state." });
+  }
+});
+
+app.get("/api/sessions/:sessionId/events", async (req, res) => {
+  const sessionId = Number(req.params.sessionId);
+  if (!Number.isInteger(sessionId) || sessionId <= 0) {
+    return res.status(400).json({ error: "Invalid session id." });
+  }
+
+  try {
+    const store = await getStore();
+    const session = store.sessions.find((row) => row.id === sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    addSessionSubscriber(sessionId, res);
+
+    const initialState = getSessionStateFromStore(store, sessionId);
+    sendSse(res, "state", initialState);
+
+    const keepAlive = setInterval(() => {
+      res.write(": keep-alive\n\n");
+    }, 20000);
+
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      removeSessionSubscriber(sessionId, res);
+      res.end();
+    });
+    return undefined;
+  } catch (_error) {
+    return res.status(500).json({ error: "Unable to open session stream." });
   }
 });
 
@@ -689,6 +827,15 @@ app.post("/api/sessions/:sessionId/swipe", async (req, res) => {
         state: getSessionStateFromStore(store, sessionId),
       };
     });
+    broadcastSessionEvent(sessionId, "state", payload.state);
+    if (payload.matched) {
+      const matchedMovie = payload.state.matches[0] || null;
+      broadcastSessionEvent(sessionId, "match", {
+        sessionId,
+        movieId,
+        movie: matchedMovie,
+      });
+    }
     return res.json(payload);
   } catch (error) {
     if (error.code === "NOT_FOUND") {

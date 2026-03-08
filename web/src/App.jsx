@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const CATEGORIES = [
@@ -57,23 +57,21 @@ const MoviePosterThumb = ({ posterUrl, title }) =>
     </div>
   );
 
-const findNextPendingMovieIndex = (queue, users, startIndex = 0) => {
-  if (!queue.length || !users.length) {
+const findMyNextMovieIndex = (queue, userId, startIndex = 0) => {
+  if (!queue.length || !userId) {
     return -1;
   }
 
   for (let index = startIndex; index < queue.length; index += 1) {
     const movie = queue[index];
-    const swipeCount = Object.keys(movie.swipes || {}).length;
-    if (!movie.matched && swipeCount < users.length) {
+    if (!movie.matched && movie.swipes?.[userId] === undefined) {
       return index;
     }
   }
 
   for (let index = 0; index < startIndex; index += 1) {
     const movie = queue[index];
-    const swipeCount = Object.keys(movie.swipes || {}).length;
-    if (!movie.matched && swipeCount < users.length) {
+    if (!movie.matched && movie.swipes?.[userId] === undefined) {
       return index;
     }
   }
@@ -81,17 +79,7 @@ const findNextPendingMovieIndex = (queue, users, startIndex = 0) => {
   return -1;
 };
 
-const pickNextSwiper = (movie, users) => {
-  if (!movie) {
-    return null;
-  }
-  for (const user of users) {
-    if (movie.swipes?.[user.id] === undefined) {
-      return user.id;
-    }
-  }
-  return users[0]?.id ?? null;
-};
+const getLatestMatch = (state) => (state?.matches?.length ? state.matches[0] : null);
 
 function App() {
   const [users, setUsers] = useState([]);
@@ -113,10 +101,20 @@ function App() {
   const [saveLoading, setSaveLoading] = useState(false);
 
   const [nightCategory, setNightCategory] = useState("regular");
+  const [joinCodeInput, setJoinCodeInput] = useState("");
   const [sessionState, setSessionState] = useState(null);
-  const [currentMovieIndex, setCurrentMovieIndex] = useState(-1);
-  const [activeSwiperUserId, setActiveSwiperUserId] = useState(null);
+  const [selectedUserId, setSelectedUserId] = useState(null);
+  const [joinLoading, setJoinLoading] = useState(false);
   const [swipeLoading, setSwipeLoading] = useState(false);
+  const [streamConnected, setStreamConnected] = useState(false);
+  const [matchPopupMovie, setMatchPopupMovie] = useState(null);
+  const [streamIssueMessage, setStreamIssueMessage] = useState("");
+  const eventSourceRef = useRef(null);
+  const lastMatchIdRef = useRef(null);
+  const lastSessionRevisionRef = useRef({
+    sessionId: null,
+    updatedAt: null,
+  });
 
   const groupedLibrary = useMemo(
     () => ({
@@ -130,24 +128,45 @@ function App() {
     [form.category],
   );
 
-  const syncSessionProgress = (state, preferredStartIndex = 0) => {
-    if (!state) {
-      setCurrentMovieIndex(-1);
-      setActiveSwiperUserId(null);
+  const applySessionState = useCallback((state, { suppressMatchPopup = false } = {}) => {
+    const incomingSessionId = state?.session?.id || null;
+    const incomingUpdatedAt = state?.session?.updatedAt || null;
+    const { sessionId: previousSessionId, updatedAt: previousUpdatedAt } = lastSessionRevisionRef.current;
+
+    if (
+      incomingSessionId &&
+      previousSessionId === incomingSessionId &&
+      incomingUpdatedAt &&
+      previousUpdatedAt &&
+      incomingUpdatedAt < previousUpdatedAt
+    ) {
       return;
     }
 
-    const nextIndex = findNextPendingMovieIndex(state.queue, state.users, preferredStartIndex);
-    setCurrentMovieIndex(nextIndex);
-
-    if (nextIndex === -1) {
-      setActiveSwiperUserId(state.users[0]?.id ?? null);
-      return;
+    if (incomingSessionId && previousSessionId !== incomingSessionId) {
+      lastMatchIdRef.current = null;
     }
 
-    const nextUserId = pickNextSwiper(state.queue[nextIndex], state.users);
-    setActiveSwiperUserId(nextUserId);
-  };
+    lastSessionRevisionRef.current = {
+      sessionId: incomingSessionId,
+      updatedAt: incomingUpdatedAt || previousUpdatedAt || null,
+    };
+
+    setSessionState(state);
+    const latestMatch = getLatestMatch(state);
+    if (!latestMatch) {
+      lastMatchIdRef.current = null;
+      return;
+    }
+    if (suppressMatchPopup) {
+      lastMatchIdRef.current = latestMatch.id;
+      return;
+    }
+    if (lastMatchIdRef.current !== latestMatch.id) {
+      lastMatchIdRef.current = latestMatch.id;
+      setMatchPopupMovie(latestMatch);
+    }
+  }, []);
 
   const loadUsers = useCallback(async () => {
     const payload = await requestJson("/api/users");
@@ -158,9 +177,7 @@ function App() {
         ? current
         : { ...current, userId: String(payload[0].id) },
     );
-    setActiveSwiperUserId((current) =>
-      current || !payload.length ? current : payload[0].id,
-    );
+    setSelectedUserId((current) => (current || !payload.length ? current : payload[0].id));
   }, []);
 
   const loadLibrary = useCallback(async () => {
@@ -179,10 +196,24 @@ function App() {
     bootstrap();
   }, [loadLibrary, loadUsers]);
 
-  const onInputChange = (field) => (event) => {
-    const value = event.target.value;
-    setForm((current) => ({ ...current, [field]: value }));
-  };
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const joinCode = params.get("join");
+    if (joinCode) {
+      setActiveTab("night");
+      setJoinCodeInput(joinCode.toUpperCase());
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionState?.users?.length) {
+      return;
+    }
+    const userIsInSession = sessionState.users.some((user) => user.id === selectedUserId);
+    if (!userIsInSession) {
+      setSelectedUserId(sessionState.users[0].id);
+    }
+  }, [selectedUserId, sessionState?.users]);
 
   const onTitleInputChange = (event) => {
     const value = event.target.value;
@@ -257,7 +288,6 @@ function App() {
         }),
       });
       applyLookupPayload(payload);
-      setStatusMessage("Movie details auto-filled from IMDb.");
     } catch (error) {
       setErrorMessage(error.message);
       setForm((current) => ({ ...current, title: suggestion.title }));
@@ -370,8 +400,8 @@ function App() {
         method: "POST",
         body: JSON.stringify({ category: nightCategory }),
       });
-      setSessionState(state);
-      syncSessionProgress(state, 0);
+      applySessionState(state, { suppressMatchPopup: true });
+      setJoinCodeInput(state.session.joinCode || "");
       setActiveTab("night");
       setStatusMessage("Movie night started.");
     } catch (error) {
@@ -379,12 +409,81 @@ function App() {
     }
   };
 
-  const submitSwipe = async (liked) => {
-    if (!sessionState || currentMovieIndex === -1 || !activeSwiperUserId) {
+  const joinSessionByCode = async (event) => {
+    event.preventDefault();
+    resetMessages();
+    const joinCode = joinCodeInput.trim().toUpperCase();
+    if (!joinCode) {
+      setErrorMessage("Enter a join code first.");
       return;
     }
 
-    const movie = sessionState.queue[currentMovieIndex];
+    setJoinLoading(true);
+    try {
+      const state = await requestJson(`/api/sessions/by-code/${encodeURIComponent(joinCode)}/state`);
+      applySessionState(state, { suppressMatchPopup: true });
+      setJoinCodeInput(state.session.joinCode || joinCode);
+      setActiveTab("night");
+      setStatusMessage(`Joined session ${state.session.joinCode}.`);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setJoinLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!sessionState?.session?.id) {
+      setStreamConnected(false);
+      setStreamIssueMessage("");
+      return undefined;
+    }
+
+    const eventSource = new EventSource(
+      `${API_BASE_URL}/api/sessions/${sessionState.session.id}/events`,
+    );
+    eventSourceRef.current = eventSource;
+    setStreamIssueMessage("");
+
+    eventSource.addEventListener("open", () => {
+      setStreamConnected(true);
+      setStreamIssueMessage("");
+    });
+
+    eventSource.addEventListener("state", (event) => {
+      const payload = JSON.parse(event.data);
+      applySessionState(payload);
+      setStreamConnected(true);
+      setStreamIssueMessage("");
+    });
+
+    eventSource.addEventListener("match", (event) => {
+      const payload = JSON.parse(event.data);
+      if (payload?.movie?.id) {
+        setMatchPopupMovie(payload.movie);
+      }
+    });
+
+    eventSource.onerror = () => {
+      setStreamConnected(false);
+      setStreamIssueMessage("Live updates disconnected. Reconnecting...");
+    };
+
+    return () => {
+      eventSource.close();
+      if (eventSourceRef.current === eventSource) {
+        eventSourceRef.current = null;
+      }
+    };
+  }, [applySessionState, sessionState?.session?.id]);
+
+  const submitSwipe = async (liked) => {
+    if (!sessionState || !selectedUserId) {
+      return;
+    }
+
+    const movieIndex = findMyNextMovieIndex(sessionState.queue, selectedUserId, 0);
+    const movie = sessionState.queue[movieIndex];
     if (!movie) {
       return;
     }
@@ -395,16 +494,15 @@ function App() {
       const payload = await requestJson(`/api/sessions/${sessionState.session.id}/swipe`, {
         method: "POST",
         body: JSON.stringify({
-          userId: activeSwiperUserId,
+          userId: selectedUserId,
           movieId: movie.id,
           liked,
         }),
       });
 
-      setSessionState(payload.state);
-      syncSessionProgress(payload.state, currentMovieIndex);
+      applySessionState(payload.state);
       if (payload.matched) {
-        setStatusMessage(`It's a match! You both picked "${movie.title}".`);
+        setStatusMessage(`It's a match! Everyone liked "${movie.title}".`);
       }
     } catch (error) {
       setErrorMessage(error.message);
@@ -412,10 +510,13 @@ function App() {
       setSwipeLoading(false);
     }
   };
-
+  const selectedUser = users.find((user) => user.id === selectedUserId);
+  const currentMovieIndex = useMemo(
+    () => findMyNextMovieIndex(sessionState?.queue || [], selectedUserId, 0),
+    [sessionState?.queue, selectedUserId],
+  );
   const currentMovie =
     sessionState && currentMovieIndex >= 0 ? sessionState.queue[currentMovieIndex] : null;
-  const activeSwiper = users.find((user) => user.id === activeSwiperUserId);
 
   return (
     <main className="app-shell">
@@ -444,6 +545,26 @@ function App() {
 
       {statusMessage ? <p className="banner success">{statusMessage}</p> : null}
       {errorMessage ? <p className="banner error">{errorMessage}</p> : null}
+      {sessionState ? (
+        <p className={`banner ${streamConnected ? "success" : "error"}`}>
+          {streamConnected ? "Live updates connected." : streamIssueMessage || "Connecting to live updates..."}
+        </p>
+      ) : null}
+
+      {matchPopupMovie ? (
+        <div className="match-popup-backdrop" role="dialog" aria-modal="true" aria-label="Match found">
+          <div className="match-popup">
+            <h3>Match found!</h3>
+            <p>
+              Everyone swiped right on <strong>{matchPopupMovie.title}</strong>
+              {matchPopupMovie.year ? ` (${matchPopupMovie.year})` : ""}.
+            </p>
+            <button type="button" onClick={() => setMatchPopupMovie(null)}>
+              Nice
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {activeTab === "library" ? (
         <section className="layout-two-columns">
@@ -508,8 +629,22 @@ function App() {
                                 onMouseDown={(event) => event.preventDefault()}
                                 onClick={() => selectSuggestion(movie)}
                               >
-                                <span>{movie.title}</span>
-                                <small>{movie.year || "Unknown year"}</small>
+                                {movie.posterUrl ? (
+                                  <img
+                                    className="autocomplete-poster"
+                                    src={movie.posterUrl}
+                                    alt={`${movie.title} poster`}
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <div className="autocomplete-poster placeholder" aria-hidden="true">
+                                    No poster
+                                  </div>
+                                )}
+                                <div className="autocomplete-copy">
+                                  <span>{movie.title}</span>
+                                  <small>{movie.year || "Unknown year"}</small>
+                                </div>
                               </button>
                             </li>
                           ))}
@@ -525,6 +660,17 @@ function App() {
               <p className="muted form-help">
                 Select a suggestion to auto-fill IMDb data, then we save with one click.
               </p>
+              {form.posterUrl ? (
+                <div className="selected-poster-preview">
+                  <img
+                    className="movie-thumb"
+                    src={form.posterUrl}
+                    alt={`${form.title || "Selected movie"} poster preview`}
+                    loading="lazy"
+                  />
+                  <small className="muted">Poster preview for the selected title</small>
+                </div>
+              ) : null}
 
               <button type="submit" disabled={saveLoading || selectionLoading}>
                 {saveLoading || selectionLoading ? "Saving..." : "Add movie to list"}
@@ -582,11 +728,40 @@ function App() {
               Start new swipe session
             </button>
 
+            <form onSubmit={joinSessionByCode} className="inline-form join-session-form">
+              <input
+                value={joinCodeInput}
+                onChange={(event) => setJoinCodeInput(event.target.value.toUpperCase())}
+                placeholder="Join code"
+                maxLength={8}
+              />
+              <button type="submit" disabled={joinLoading}>
+                {joinLoading ? "Joining..." : "Join session"}
+              </button>
+            </form>
+
+            <label>
+              You are swiping as
+              <select
+                value={selectedUserId || ""}
+                onChange={(event) => setSelectedUserId(Number(event.target.value))}
+                disabled={!users.length}
+              >
+                {!users.length ? <option value="">No users yet</option> : null}
+                {users.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             {sessionState ? (
               <div className="session-meta">
                 <p>
                   Session #{sessionState.session.id} ({sessionState.session.category})
                 </p>
+                <p>Join code: {sessionState.session.joinCode || "Unavailable"}</p>
                 <p>
                   Queue size: {sessionState.queue.length} movies | Matches: {sessionState.matches.length}
                 </p>
@@ -625,14 +800,24 @@ function App() {
                   {currentMovie.plot ? <p>{currentMovie.plot}</p> : null}
                   <small>Added by: {currentMovie.addedBy.join(", ")}</small>
                   <p className="turn-text">
-                    Turn: <strong>{activeSwiper?.name || "Unknown"}</strong>
+                    Swiping as: <strong>{selectedUser?.name || "Unknown"}</strong>
                   </p>
                 </div>
                 <div className="swipe-actions">
-                  <button type="button" className="reject" onClick={() => submitSwipe(false)} disabled={swipeLoading}>
+                  <button
+                    type="button"
+                    className="reject"
+                    onClick={() => submitSwipe(false)}
+                    disabled={swipeLoading || !selectedUserId}
+                  >
                     Swipe left
                   </button>
-                  <button type="button" className="accept" onClick={() => submitSwipe(true)} disabled={swipeLoading}>
+                  <button
+                    type="button"
+                    className="accept"
+                    onClick={() => submitSwipe(true)}
+                    disabled={swipeLoading || !selectedUserId}
+                  >
                     Swipe right
                   </button>
                 </div>
